@@ -1,19 +1,67 @@
 import { DatabaseSync } from 'node:sqlite';
 import path from 'path';
 import fs from 'fs';
+import os from 'os';
 import crypto from 'node:crypto';
 
-const DATA_DIR = path.join(process.cwd(), 'data');
-if (!fs.existsSync(DATA_DIR)) {
-  fs.mkdirSync(DATA_DIR, { recursive: true });
+function resolveDatabasePath(): string {
+  // In Vercel, AWS Lambda, or serverless environments, process.cwd() is strictly read-only.
+  // We use the writable /tmp directory.
+  const isServerless = Boolean(
+    process.env.VERCEL ||
+    process.env.AWS_LAMBDA_FUNCTION_NAME ||
+    process.env.LAMBDA_TASK_ROOT
+  );
+
+  if (isServerless) {
+    try {
+      const tmpDir = path.join(os.tmpdir(), 'focus_os_data');
+      if (!fs.existsSync(tmpDir)) {
+        fs.mkdirSync(tmpDir, { recursive: true });
+      }
+      return path.join(tmpDir, 'focus_os.sqlite');
+    } catch {
+      return ':memory:';
+    }
+  }
+
+  // Standard persistent container/server environment
+  try {
+    const localDir = path.join(process.cwd(), 'data');
+    if (!fs.existsSync(localDir)) {
+      fs.mkdirSync(localDir, { recursive: true });
+    }
+    // Verify write permissions
+    const testFile = path.join(localDir, '.write_test');
+    fs.writeFileSync(testFile, '1');
+    fs.unlinkSync(testFile);
+    return path.join(localDir, 'focus_os.sqlite');
+  } catch {
+    // Fallback to /tmp if process.cwd() is read-only
+    try {
+      const fallbackDir = path.join(os.tmpdir(), 'focus_os_data');
+      if (!fs.existsSync(fallbackDir)) {
+        fs.mkdirSync(fallbackDir, { recursive: true });
+      }
+      return path.join(fallbackDir, 'focus_os.sqlite');
+    } catch {
+      return ':memory:';
+    }
+  }
 }
 
-const DB_PATH = path.join(DATA_DIR, 'focus_os.sqlite');
+const DB_PATH = resolveDatabasePath();
 export const db = new DatabaseSync(DB_PATH);
 
-// Configure SQLite pragmas
-db.exec('PRAGMA journal_mode = WAL;');
-db.exec('PRAGMA foreign_keys = ON;');
+// Configure SQLite pragmas safely
+try {
+  if (DB_PATH !== ':memory:') {
+    db.exec('PRAGMA journal_mode = WAL;');
+  }
+  db.exec('PRAGMA foreign_keys = ON;');
+} catch (pragmaErr) {
+  console.warn('[SQLite PRAGMA Notice]:', pragmaErr);
+}
 
 export function hashPassword(password: string, salt = crypto.randomBytes(16).toString('hex')): { hash: string; salt: string } {
   const hash = crypto.scryptSync(password, salt, 64).toString('hex');

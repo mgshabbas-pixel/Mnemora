@@ -38,6 +38,7 @@ import { AuthView } from './components/AuthView';
 import { QuickAddModal } from './components/QuickAddModal';
 import { OfflineIndicator } from './components/OfflineIndicator';
 import { getLocalToday, getWeekBounds } from './utils/dateUtils';
+import { safeApiRequest } from './utils/apiClient';
 
 export default function App() {
   // Auth state
@@ -89,25 +90,27 @@ export default function App() {
 
   // 1. Verify token on startup
   useEffect(() => {
+    let isMounted = true;
     const verifyAuth = async () => {
       const savedToken = localStorage.getItem('focus_os_token');
       if (!savedToken) {
-        setIsAuthChecking(false);
+        if (isMounted) setIsAuthChecking(false);
         return;
       }
 
       try {
-        const res = await fetch('/api/auth/me', {
+        const result = await safeApiRequest<{ user: UserProfile }>('/api/auth/me', {
           headers: {
             Authorization: `Bearer ${savedToken}`,
           },
         });
 
-        if (res.ok) {
-          const data = await res.json();
-          setCurrentUser(data.user);
+        if (!isMounted) return;
+
+        if (result.ok && result.data?.user) {
+          setCurrentUser(result.data.user);
           setToken(savedToken);
-          localStorage.setItem('focus_os_user', JSON.stringify(data.user));
+          localStorage.setItem('focus_os_user', JSON.stringify(result.data.user));
         } else {
           // Token expired or invalid
           localStorage.removeItem('focus_os_token');
@@ -118,11 +121,15 @@ export default function App() {
       } catch (err) {
         console.warn('Network error during auth verification', err);
       } finally {
-        setIsAuthChecking(false);
+        if (isMounted) setIsAuthChecking(false);
       }
     };
 
     verifyAuth();
+
+    return () => {
+      isMounted = false;
+    };
   }, []);
 
   // 2. Fetch personal execution data when authenticated
@@ -802,7 +809,7 @@ export default function App() {
             />
           )}
 
-          {activeSection === 'admin' && (
+          {activeSection === 'admin' && currentUser?.role === 'admin' && (
             <AdminView
               token={token}
               currentUser={currentUser}

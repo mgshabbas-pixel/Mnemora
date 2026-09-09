@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
-import { Shield, KeyRound, User, Mail, Lock, ArrowRight, CheckCircle2, AlertCircle } from 'lucide-react';
+import { User, Mail, Lock, ArrowRight, CheckCircle2, AlertCircle } from 'lucide-react';
 import { UserProfile } from '../types';
+import { safeApiRequest } from '../utils/apiClient';
 
 interface AuthViewProps {
   onAuthSuccess: (token: string, user: UserProfile) => void;
@@ -15,12 +16,6 @@ export const AuthView: React.FC<AuthViewProps> = ({ onAuthSuccess }) => {
   const [error, setError] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
 
-  const handleFillAdmin = () => {
-    setEmail('mgshabbas@gmail.com');
-    setPassword('FocusAdmin2026!');
-    setError(null);
-  };
-
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
@@ -28,34 +23,48 @@ export const AuthView: React.FC<AuthViewProps> = ({ onAuthSuccess }) => {
     setLoading(true);
 
     try {
+      const cleanEmail = email.trim().toLowerCase();
+
       if (mode === 'login') {
-        const res = await fetch('/api/auth/login', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ email, password }),
-        });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.error || 'Failed to sign in');
+        const result = await safeApiRequest<{ token: string; user: UserProfile }>(
+          '/api/auth/login',
+          {
+            method: 'POST',
+            body: JSON.stringify({ email: cleanEmail, password }),
+          }
+        );
 
-        onAuthSuccess(data.token, data.user);
+        if (!result.ok || !result.data) {
+          throw new Error(result.error || 'Invalid email or password.');
+        }
+
+        onAuthSuccess(result.data.token, result.data.user);
       } else if (mode === 'register') {
-        const res = await fetch('/api/auth/register', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ name, email, password }),
-        });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.error || 'Failed to create account');
+        const result = await safeApiRequest<{ token: string; user: UserProfile }>(
+          '/api/auth/register',
+          {
+            method: 'POST',
+            body: JSON.stringify({ name: name.trim(), email: cleanEmail, password }),
+          }
+        );
 
-        onAuthSuccess(data.token, data.user);
+        if (!result.ok || !result.data) {
+          throw new Error(result.error || 'Failed to create account.');
+        }
+
+        onAuthSuccess(result.data.token, result.data.user);
       } else if (mode === 'reset') {
-        const res = await fetch('/api/auth/reset-password', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ email, newPassword: password }),
-        });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.error || 'Failed to reset password');
+        const result = await safeApiRequest(
+          '/api/auth/reset-password',
+          {
+            method: 'POST',
+            body: JSON.stringify({ email: cleanEmail, newPassword: password }),
+          }
+        );
+
+        if (!result.ok) {
+          throw new Error(result.error || 'Failed to reset password.');
+        }
 
         setSuccessMessage('Password reset successfully. You can now sign in.');
         setMode('login');
@@ -216,30 +225,6 @@ export const AuthView: React.FC<AuthViewProps> = ({ onAuthSuccess }) => {
             <ArrowRight className="w-3.5 h-3.5" />
           </button>
         </form>
-
-        {/* Administrator Quick Helper */}
-        {mode === 'login' && (
-          <div className="mt-6 pt-4 border-t border-[#F0F0EC] bg-[#FBFBFA] -mx-6 -mb-6 sm:-mx-8 sm:-mb-8 p-4 rounded-b-xl">
-            <div className="flex items-start justify-between gap-3">
-              <div className="text-left">
-                <div className="flex items-center gap-1.5 text-[11px] font-bold text-[#1C1D1F]">
-                  <Shield className="w-3.5 h-3.5 text-[#1C1D1F]" />
-                  <span>Administrator Account</span>
-                </div>
-                <p className="text-[11px] text-[#71717A] mt-0.5 font-mono">
-                  mgshabbas@gmail.com
-                </p>
-              </div>
-              <button
-                type="button"
-                onClick={handleFillAdmin}
-                className="px-2.5 py-1 text-[11px] font-semibold text-[#1C1D1F] bg-white border border-[#DCDCD8] hover:border-[#1C1D1F] rounded transition-colors cursor-pointer"
-              >
-                Auto-fill
-              </button>
-            </div>
-          </div>
-        )}
       </div>
 
       {/* Security Statement */}

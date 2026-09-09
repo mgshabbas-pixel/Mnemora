@@ -94,13 +94,17 @@ export const SidebarNav: React.FC<SidebarNavProps> = ({
     },
     { id: 'history', label: 'History', icon: History },
     { id: 'settings', label: 'Settings', icon: Settings },
-    {
-      id: 'admin',
-      label: 'Admin',
-      icon: ShieldCheck,
-      badge: currentUser?.role === 'admin' ? 'Active' : undefined,
-      badgeColor: 'green',
-    },
+    ...(currentUser?.role === 'admin'
+      ? [
+          {
+            id: 'admin' as MainSection,
+            label: 'Admin',
+            icon: ShieldCheck,
+            badge: 'Active',
+            badgeColor: 'green' as const,
+          },
+        ]
+      : []),
   ];
 
   const handleNavItemClick = (sectionId: MainSection) => {

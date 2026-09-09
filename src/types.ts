@@ -17,6 +17,7 @@ export interface Activity {
   priority: Priority;
   goalId?: string; // Related goal
   reminder: ReminderOption;
+  reminderMinutes?: number;
   recurring?: RecurringOption;
   notes?: string;
   status: ActivityStatus;
@@ -102,6 +103,10 @@ export interface HistoricalWeekRecord {
   highPriorityRate: number;
   consistency: number;
   review?: WeeklyReviewRecord;
+  reviewNotes?: string;
+  whatWentWell?: string;
+  whatDidnt?: string;
+  whatShouldImprove?: string;
 }
 
 export interface CategoryItem {
