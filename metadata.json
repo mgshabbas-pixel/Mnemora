@@ -1,0 +1,6 @@
+{
+  "name": "FOCUS OS",
+  "description": "A personal execution and performance system for one person to plan, execute, measure, and continuously improve goals, weekly plans, and daily activities.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

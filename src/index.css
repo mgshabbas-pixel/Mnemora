@@ -1,0 +1,37 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --font-primary: "Manrope", sans-serif;
+    --font-data: "Inter", sans-serif;
+  }
+
+  body {
+    font-family: var(--font-primary);
+    background-color: #FBFBFA;
+    color: #1C1D1F;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  .font-data {
+    font-family: var(--font-data);
+    font-feature-settings: "tnum" on, "cv05" on;
+  }
+}
+
+@media print {
+  body {
+    background-color: #FFFFFF !important;
+    color: #000000 !important;
+  }
+  .no-print {
+    display: none !important;
+  }
+  .print-only {
+    display: block !important;
+  }
+  .print-break-inside-avoid {
+    break-inside: avoid;
+  }
+}

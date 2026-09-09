@@ -1,0 +1,19 @@
+<svg width="512" height="512" viewBox="0 0 512 512" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect width="512" height="512" rx="108" fill="#0C0D10"/>
+  <!-- Outer glowing concentric track -->
+  <circle cx="256" cy="256" r="180" stroke="#25272C" stroke-width="24" stroke-linecap="round"/>
+  <!-- Green execution progress arc (~75%) -->
+  <circle cx="256" cy="256" r="180" stroke="#16A34A" stroke-width="24" stroke-dasharray="848 1131" stroke-dashoffset="0" stroke-linecap="round"/>
+  <!-- Inner focus target ring -->
+  <circle cx="256" cy="256" r="110" stroke="#2E3036" stroke-width="12"/>
+  <circle cx="256" cy="256" r="110" stroke="#EA580C" stroke-width="12" stroke-dasharray="240 691" stroke-dashoffset="-120" stroke-linecap="round"/>
+  <!-- Central bullseye / focus dot -->
+  <circle cx="256" cy="256" r="44" fill="#FFFFFF"/>
+  <circle cx="256" cy="256" r="24" fill="#16A34A"/>
+  <circle cx="256" cy="256" r="10" fill="#FFFFFF"/>
+  <!-- Precision crosshairs -->
+  <line x1="256" y1="96" x2="256" y2="124" stroke="#FFFFFF" stroke-width="6" stroke-linecap="round"/>
+  <line x1="256" y1="388" x2="256" y2="416" stroke="#FFFFFF" stroke-width="6" stroke-linecap="round"/>
+  <line x1="96" y1="256" x2="124" y2="256" stroke="#FFFFFF" stroke-width="6" stroke-linecap="round"/>
+  <line x1="388" y1="256" x2="416" y2="256" stroke="#FFFFFF" stroke-width="6" stroke-linecap="round"/>
+</svg>
