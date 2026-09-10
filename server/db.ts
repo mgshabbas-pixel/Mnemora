@@ -5,6 +5,10 @@ import os from 'os';
 import crypto from 'node:crypto';
 
 function resolveDatabasePath(): string {
+  if (process.env.DATABASE_PATH) {
+    return path.resolve(process.env.DATABASE_PATH);
+  }
+
   // In Vercel, AWS Lambda, or serverless environments, process.cwd() is strictly read-only.
   // We use the writable /tmp directory.
   const isServerless = Boolean(
@@ -252,40 +256,12 @@ export function initDatabase() {
     }
   }
 
-  // Seed primary admin account if not already present
-  const adminEmail = 'mgshabbas@gmail.com';
-  const checkAdminStmt = db.prepare('SELECT id FROM users WHERE email = ?');
-  const existingAdmin = checkAdminStmt.get(adminEmail) as { id: string } | undefined;
-
-  if (!existingAdmin) {
-    const adminId = 'usr-admin-mgshabbas';
-    const initialAdminPassword = 'FocusAdmin2026!';
-    const { hash, salt } = hashPassword(initialAdminPassword);
-    const now = new Date().toISOString();
-
-    const insertUser = db.prepare(`
-      INSERT INTO users (id, name, email, password_hash, salt, role, status, created_at)
-      VALUES (?, ?, ?, ?, ?, 'admin', 'active', ?)
-    `);
-
-    insertUser.run(
-      adminId,
-      'Administrator (M. Shabbas)',
-      adminEmail,
-      hash,
-      salt,
-      now
-    );
-
-    console.log(`[FOCUS OS Database] Initialized admin user: ${adminEmail}`);
-  }
-
   // Seed initial audit log entry if table is empty
   const logCountRow = db.prepare('SELECT count(*) as count FROM audit_logs').get() as { count: number };
   if (logCountRow.count === 0) {
     const initialLogs = [
       { id: 'log-1', timestamp: new Date(Date.now() - 3600000 * 24).toISOString(), event: 'SYSTEM_BOOTSTRAP', user_email: 'system', level: 'info', details: 'Database initialized with SQLite WAL mode and isolated schemas.' },
-      { id: 'log-2', timestamp: new Date(Date.now() - 3600000 * 12).toISOString(), event: 'ADMIN_SEEDED', user_email: adminEmail, level: 'info', details: 'Primary administrator identity provisioned successfully.' },
+      { id: 'log-2', timestamp: new Date(Date.now() - 3600000 * 12).toISOString(), event: 'AUTH_STORAGE_CONFIGURED', user_email: 'system', level: 'info', details: 'Authentication storage configured without hardcoded administrator credentials.' },
       { id: 'log-3', timestamp: new Date().toISOString(), event: 'SETTINGS_INITIALIZED', user_email: 'system', level: 'info', details: 'Default operational settings verified.' },
     ];
     const insertLog = db.prepare('INSERT INTO audit_logs (id, timestamp, event, user_email, level, details) VALUES (?, ?, ?, ?, ?, ?)');
@@ -309,5 +285,43 @@ export function logAuditEvent(event: string, userEmail: string, level: 'info' | 
     );
   } catch (err) {
     console.warn('Failed to log audit event:', err);
+  }
+}
+
+export function ensureLocalUserRecord(user: {
+  id: string;
+  name: string;
+  email: string;
+  role: 'admin' | 'user';
+  status: 'active' | 'deactivated';
+  created_at: string;
+  last_login_at?: string;
+}): void {
+  db.prepare(`
+    INSERT INTO users (id, name, email, password_hash, salt, role, status, created_at, last_login_at)
+    VALUES (?, ?, ?, '', '', ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      name = excluded.name,
+      email = excluded.email,
+      role = excluded.role,
+      status = excluded.status,
+      last_login_at = excluded.last_login_at
+  `).run(
+    user.id,
+    user.name,
+    user.email,
+    user.role,
+    user.status,
+    user.created_at,
+    user.last_login_at || null,
+  );
+}
+
+export function getSystemSetting(key: string, fallback: string): string {
+  try {
+    const row = db.prepare('SELECT value FROM system_settings WHERE key = ?').get(key) as { value?: string } | undefined;
+    return row?.value || fallback;
+  } catch {
+    return fallback;
   }
 }

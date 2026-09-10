@@ -1,7 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import {
   Shield,
-  ShieldCheck,
   Users,
   Database,
   FileText,
@@ -28,7 +27,6 @@ import { AdminAnalyticsData, AdminUserListItem, UserProfile } from '../types';
 interface AdminViewProps {
   token: string;
   currentUser: UserProfile;
-  onElevateRole?: () => void;
 }
 
 type AdminTab = 'dashboard' | 'users' | 'data' | 'reports' | 'logs' | 'settings';
@@ -67,7 +65,6 @@ interface AuditLog {
 export const AdminView: React.FC<AdminViewProps> = ({
   token,
   currentUser,
-  onElevateRole,
 }) => {
   const [activeTab, setActiveTab] = useState<AdminTab>('dashboard');
   const [loading, setLoading] = useState(true);
@@ -135,13 +132,19 @@ export const AdminView: React.FC<AdminViewProps> = ({
 
       if (analyticsRes.ok) {
         setAnalytics(await analyticsRes.json());
+      } else {
+        throw new Error('Failed to load admin analytics.');
       }
       if (usersRes.ok) {
         const uData = await usersRes.json();
         setUsers(uData.users || []);
+      } else {
+        throw new Error('Failed to load registered users.');
       }
       if (dataSummaryRes.ok) {
         setDataSummary(await dataSummaryRes.json());
+      } else {
+        throw new Error('Failed to load data summary.');
       }
     } catch (err: any) {
       setMessage({ text: err.message || 'Failed to connect to admin services.', type: 'error' });
@@ -161,62 +164,43 @@ export const AdminView: React.FC<AdminViewProps> = ({
 
     if (activeTab === 'reports') {
       fetch('/api/admin/reports', { headers })
-        .then((r) => (r.ok ? r.json() : null))
+        .then((r) => {
+          if (!r.ok) throw new Error('Failed to load execution reports.');
+          return r.json();
+        })
         .then((data) => data && setReportData(data))
-        .catch(() => {});
+        .catch((err) => setMessage({ text: err.message, type: 'error' }));
     } else if (activeTab === 'logs') {
       fetch(`/api/admin/logs?level=${logLevel}&query=${encodeURIComponent(logSearch)}`, { headers })
-        .then((r) => (r.ok ? r.json() : null))
+        .then((r) => {
+          if (!r.ok) throw new Error('Failed to load activity logs.');
+          return r.json();
+        })
         .then((data) => data && setLogs(data.logs || []))
-        .catch(() => {});
+        .catch((err) => setMessage({ text: err.message, type: 'error' }));
     } else if (activeTab === 'settings') {
       fetch('/api/admin/settings', { headers })
-        .then((r) => (r.ok ? r.json() : null))
+        .then((r) => {
+          if (!r.ok) throw new Error('Failed to load application settings.');
+          return r.json();
+        })
         .then((data) => {
           if (data) {
             setAppSettings(data.settings || {});
             setEnvInfo(data.environment || {});
           }
         })
-        .catch(() => {});
+        .catch((err) => setMessage({ text: err.message, type: 'error' }));
     } else if (activeTab === 'data') {
       fetch('/api/admin/data-summary', { headers })
-        .then((r) => (r.ok ? r.json() : null))
+        .then((r) => {
+          if (!r.ok) throw new Error('Failed to load data management summary.');
+          return r.json();
+        })
         .then((data) => data && setDataSummary(data))
-        .catch(() => {});
+        .catch((err) => setMessage({ text: err.message, type: 'error' }));
     }
   }, [activeTab, logLevel, logSearch, isUserAdmin]);
-
-  // Self Elevation handler
-  const handleElevateSelf = async () => {
-    setActionLoading(true);
-    try {
-      const res = await fetch('/api/admin/elevate-me', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
-        },
-      });
-
-      if (!res.ok) {
-        const data = await res.json();
-        throw new Error(data.error || 'Failed to elevate privileges');
-      }
-
-      setMessage({ text: 'Administrative access granted successfully.', type: 'success' });
-      if (onElevateRole) {
-        onElevateRole();
-      }
-      setTimeout(() => {
-        window.location.reload();
-      }, 500);
-    } catch (err: any) {
-      setMessage({ text: err.message, type: 'error' });
-    } finally {
-      setActionLoading(false);
-    }
-  };
 
   // User Management Actions
   const handleToggleStatus = async (user: AdminUserListItem) => {
@@ -228,7 +212,7 @@ export const AdminView: React.FC<AdminViewProps> = ({
     const nextStatus = user.status === 'active' ? 'deactivated' : 'active';
     try {
       const res = await fetch(`/api/admin/users/${user.id}/status`, {
-        method: 'PATCH',
+        method: 'PUT',
         headers: {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${token}`,
@@ -257,7 +241,7 @@ export const AdminView: React.FC<AdminViewProps> = ({
     const nextRole = user.role === 'admin' ? 'user' : 'admin';
     try {
       const res = await fetch(`/api/admin/users/${user.id}/role`, {
-        method: 'PATCH',
+        method: 'PUT',
         headers: {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${token}`,
@@ -288,7 +272,7 @@ export const AdminView: React.FC<AdminViewProps> = ({
           'Content-Type': 'application/json',
           Authorization: `Bearer ${token}`,
         },
-        body: JSON.stringify({ newPassword }),
+        body: JSON.stringify({ password: newPassword }),
       });
 
       if (!res.ok) {
@@ -382,10 +366,11 @@ export const AdminView: React.FC<AdminViewProps> = ({
       const url = window.URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `FOCUS_OS_backup_${new Date().toISOString().slice(0, 10)}.json`;
+      a.download = `mnemora-backup-${new Date().toISOString().slice(0, 10)}.json`;
       document.body.appendChild(a);
       a.click();
       a.remove();
+      window.URL.revokeObjectURL(url);
       setMessage({ text: 'Database backup downloaded successfully.', type: 'success' });
     } catch (err: any) {
       setMessage({ text: err.message, type: 'error' });
@@ -469,7 +454,10 @@ export const AdminView: React.FC<AdminViewProps> = ({
     const link = document.createElement('a');
     link.href = url;
     link.download = `FOCUS_OS_Execution_Report_${new Date().toISOString().slice(0, 10)}.csv`;
+    document.body.appendChild(link);
     link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
   };
 
   // Filter users
@@ -481,43 +469,6 @@ export const AdminView: React.FC<AdminViewProps> = ({
     const matchesRole = userRoleFilter === 'all' || u.role === userRoleFilter;
     return matchesSearch && matchesStatus && matchesRole;
   });
-
-  // Non-admin Elevation Prompt Screen
-  if (!isUserAdmin) {
-    return (
-      <div className="max-w-4xl mx-auto px-4 py-12">
-        <div className="p-8 rounded-2xl bg-white border border-[#E5E5E5] shadow-xs text-center">
-          <div className="w-16 h-16 rounded-2xl bg-[#0C0D10] text-white flex items-center justify-center mx-auto mb-5 shadow-sm">
-            <Shield className="w-8 h-8 text-[#EA580C]" />
-          </div>
-
-          <h2 className="text-2xl font-black text-[#0C0D10] tracking-tight mb-2">
-            Administrator Access Verification
-          </h2>
-
-          <p className="text-sm text-[#71717A] max-w-lg mx-auto mb-6 leading-relaxed">
-            You are currently signed in as{' '}
-            <span className="font-bold text-[#0C0D10]">{currentUser.email}</span> with standard{' '}
-            <span className="font-bold uppercase tracking-wider text-xs px-2 py-0.5 rounded bg-zinc-100 text-zinc-800">
-              {currentUser.role}
-            </span>{' '}
-            permissions. Full administrator privileges are required to access this portal.
-          </p>
-
-          <div className="flex flex-col sm:flex-row items-center justify-center gap-3">
-            <button
-              onClick={handleElevateSelf}
-              disabled={actionLoading}
-              className="w-full sm:w-auto px-6 py-3 rounded-lg bg-[#16A34A] hover:bg-[#15803D] text-white text-sm font-bold shadow-xs transition-all active:scale-[0.98] cursor-pointer flex items-center justify-center gap-2"
-            >
-              <ShieldCheck className="w-4 h-4" />
-              <span>{actionLoading ? 'Promoting...' : 'Elevate Account to Administrator'}</span>
-            </button>
-          </div>
-        </div>
-      </div>
-    );
-  }
 
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 space-y-6">
@@ -695,11 +646,11 @@ export const AdminView: React.FC<AdminViewProps> = ({
               <div className="mt-2 flex items-center gap-2">
                 <span className="w-2.5 h-2.5 rounded-full bg-[#16A34A] animate-pulse" />
                 <span className="text-lg font-black tracking-tight text-white">
-                  Healthy & Operational
+                  {analytics?.systemStatus ?? 'Checking status...'}
                 </span>
               </div>
               <div className="mt-2 text-[11px] text-[#A1A1AA] flex items-center justify-between">
-                <span>SQLite WAL Engine</span>
+                <span>Hosted Auth + Local Data Engine</span>
                 <span className="text-white font-mono font-bold">Port 3000</span>
               </div>
             </div>
@@ -749,7 +700,7 @@ export const AdminView: React.FC<AdminViewProps> = ({
                   <span className="text-xs font-bold text-[#0C0D10]">Prune Stale Sessions</span>
                 </div>
                 <p className="text-[11px] text-[#71717A]">
-                  Optimize SQLite storage and vacuum.
+                  Prune expired sessions and optimize storage.
                 </p>
               </button>
 
@@ -869,13 +820,13 @@ export const AdminView: React.FC<AdminViewProps> = ({
                         <td className="px-4 py-3.5">
                           <button
                             onClick={() => handleToggleStatus(u)}
-                            disabled={u.id === currentUser.id || u.email === 'mgshabbas@gmail.com'}
+                            disabled={u.id === currentUser.id}
                             className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase transition-colors ${
                               u.status === 'active'
                                 ? 'bg-green-100 text-green-800'
                                 : 'bg-red-100 text-red-800'
                             } ${
-                              u.id === currentUser.id || u.email === 'mgshabbas@gmail.com'
+                              u.id === currentUser.id
                                 ? 'cursor-not-allowed opacity-90'
                                 : 'cursor-pointer'
                             }`}
@@ -924,7 +875,7 @@ export const AdminView: React.FC<AdminViewProps> = ({
                               <KeyRound className="w-4 h-4" />
                             </button>
 
-                            {u.id !== currentUser.id && u.email !== 'mgshabbas@gmail.com' && (
+                            {u.id !== currentUser.id && (
                               <button
                                 onClick={() => handleDeleteUser(u)}
                                 className="p-1.5 rounded text-[#71717A] hover:text-red-600 hover:bg-red-50 cursor-pointer"
@@ -1009,7 +960,7 @@ export const AdminView: React.FC<AdminViewProps> = ({
                   Database Optimization & Pruning
                 </h3>
                 <p className="text-xs text-[#71717A] mb-4 leading-relaxed">
-                  Purge expired authentication session tokens, perform SQLite index analysis, and optimize disk footprint.
+                  Purge expired authentication sessions and optimize local development storage.
                 </p>
                 <button
                   onClick={handleVacuumDatabase}
@@ -1049,7 +1000,7 @@ export const AdminView: React.FC<AdminViewProps> = ({
 
           {/* Priority Breakdown */}
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            {reportData?.priorityStats.map((p) => {
+                  {reportData?.priorityStats.length ? reportData.priorityStats.map((p) => {
               const rate = p.total > 0 ? Math.round((p.completed / p.total) * 100) : 0;
               const isHigh = p.priority === 'high';
               return (
@@ -1066,7 +1017,7 @@ export const AdminView: React.FC<AdminViewProps> = ({
                     <span className="text-2xl font-black text-[#0C0D10] font-mono">
                       {rate}%
                     </span>
-                    <span className="text-xs text-[#71717A] font-mono">
+                      <span className="text-xs text-[#71717A] font-mono">
                       {p.completed} / {p.total} done
                     </span>
                   </div>
@@ -1078,7 +1029,9 @@ export const AdminView: React.FC<AdminViewProps> = ({
                   </div>
                 </div>
               );
-            })}
+            }) : (
+              <div className="p-6 text-center text-xs text-[#71717A]">No execution data is available yet.</div>
+            )}
           </div>
 
           {/* User Productivity Leaderboard */}
@@ -1100,7 +1053,7 @@ export const AdminView: React.FC<AdminViewProps> = ({
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-[#E5E5E5]">
-                  {reportData?.leaderboard.map((m, idx) => (
+                  {reportData?.leaderboard.length ? reportData.leaderboard.map((m, idx) => (
                     <tr key={m.id} className="hover:bg-[#FAFAFA]">
                       <td className="px-4 py-3.5">
                         <div className="flex items-center gap-2.5">
@@ -1120,7 +1073,9 @@ export const AdminView: React.FC<AdminViewProps> = ({
                       <td className="px-4 py-3.5 font-mono font-bold text-[#16A34A]">{m.rate}%</td>
                       <td className="px-4 py-3.5 font-mono font-bold text-[#EA580C]">{m.onTimeRate}%</td>
                     </tr>
-                  ))}
+                  )) : (
+                    <tr><td colSpan={5} className="px-4 py-8 text-center text-[#71717A]">No user execution data is available yet.</td></tr>
+                  )}
                 </tbody>
               </table>
             </div>

@@ -1,6 +1,11 @@
 import { Request, Response, NextFunction } from 'express';
-import crypto from 'node:crypto';
-import { db } from './db';
+import { ensureLocalUserRecord } from './db';
+import {
+  createAuthSession,
+  deleteAuthSession,
+  ensureAuthDatabase,
+  findUserBySession,
+} from './authDb';
 
 export interface AuthenticatedUser {
   id: string;
@@ -17,42 +22,26 @@ export interface AuthenticatedRequest extends Request {
   token?: string;
 }
 
-export function createSession(userId: string): string {
-  const token = crypto.randomBytes(32).toString('hex');
-  const createdAt = new Date().toISOString();
-  // 30 days session expiry
-  const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
-
-  const stmt = db.prepare(`
-    INSERT INTO sessions (token, user_id, created_at, expires_at)
-    VALUES (?, ?, ?, ?)
-  `);
-  stmt.run(token, userId, createdAt, expiresAt);
-
-  return token;
+export async function createSession(userId: string): Promise<string> {
+  await ensureAuthDatabase();
+  return createAuthSession(userId);
 }
 
-export function deleteSession(token: string): void {
-  const stmt = db.prepare('DELETE FROM sessions WHERE token = ?');
-  stmt.run(token);
+export async function deleteSession(token: string): Promise<void> {
+  await ensureAuthDatabase();
+  await deleteAuthSession(token);
 }
 
-export function getUserFromToken(token: string): AuthenticatedUser | null {
+export async function getUserFromToken(token: string): Promise<AuthenticatedUser | null> {
   if (!token) return null;
 
-  const query = db.prepare(`
-    SELECT u.id, u.name, u.email, u.role, u.status, u.created_at, u.last_login_at, s.expires_at
-    FROM sessions s
-    JOIN users u ON u.id = s.user_id
-    WHERE s.token = ?
-  `);
-
-  const row = query.get(token) as unknown as (AuthenticatedUser & { expires_at: string }) | undefined;
+  await ensureAuthDatabase();
+  const row = await findUserBySession(token);
   if (!row) return null;
 
   // Check if session has expired
   if (new Date(row.expires_at) < new Date()) {
-    deleteSession(token);
+    await deleteSession(token);
     return null;
   }
 
@@ -72,28 +61,34 @@ export function getUserFromToken(token: string): AuthenticatedUser | null {
   };
 }
 
-export function requireAuth(req: AuthenticatedRequest, res: Response, next: NextFunction): void {
-  const authHeader = req.headers.authorization;
-  const token = authHeader?.startsWith('Bearer ') ? authHeader.slice(7).trim() : null;
+export async function requireAuth(req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const authHeader = req.headers.authorization;
+    const token = authHeader?.startsWith('Bearer ') ? authHeader.slice(7).trim() : null;
 
-  if (!token) {
-    res.status(401).json({ error: 'Authentication required. Please sign in.' });
-    return;
+    if (!token) {
+      res.status(401).json({ error: 'Authentication required. Please sign in.' });
+      return;
+    }
+
+    const user = await getUserFromToken(token);
+    if (!user) {
+      res.status(401).json({ error: 'Invalid or expired session. Please sign in again.' });
+      return;
+    }
+
+    ensureLocalUserRecord(user);
+    req.user = user;
+    req.token = token;
+    next();
+  } catch (error) {
+    console.error('Authentication store error:', error);
+    res.status(503).json({ error: 'Authentication service is temporarily unavailable.' });
   }
-
-  const user = getUserFromToken(token);
-  if (!user) {
-    res.status(401).json({ error: 'Invalid or expired session. Please sign in again.' });
-    return;
-  }
-
-  req.user = user;
-  req.token = token;
-  next();
 }
 
-export function requireAdmin(req: AuthenticatedRequest, res: Response, next: NextFunction): void {
-  requireAuth(req, res, () => {
+export async function requireAdmin(req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> {
+  await requireAuth(req, res, () => {
     if (!req.user || req.user.role !== 'admin') {
       res.status(403).json({ error: 'Forbidden. Administrator privileges required.' });
       return;

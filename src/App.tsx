@@ -813,11 +813,6 @@ export default function App() {
             <AdminView
               token={token}
               currentUser={currentUser}
-              onElevateRole={() => {
-                const updated = { ...currentUser, role: 'admin' as const };
-                setCurrentUser(updated);
-                localStorage.setItem('focus_os_user', JSON.stringify(updated));
-              }}
             />
           )}
         </main>

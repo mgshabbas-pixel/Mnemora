@@ -28,14 +28,14 @@ export async function safeApiRequest<T = any>(
       headers,
     });
 
-    const contentType = res.headers.get('content-type') || '';
+    const responseText = await res.text();
     let parsedData: any = null;
 
-    if (contentType.includes('application/json')) {
+    if (responseText) {
       try {
-        parsedData = await res.json();
-      } catch (jsonErr) {
-        console.warn(`[API] Failed to parse JSON response from ${url}:`, jsonErr);
+        parsedData = JSON.parse(responseText);
+      } catch {
+        // Hosting or proxy errors may return plain text or HTML.
       }
     }
 
@@ -43,7 +43,7 @@ export async function safeApiRequest<T = any>(
       return {
         ok: true,
         status: res.status,
-        data: parsedData as T,
+        data: (parsedData ?? (responseText as T)) as T,
       };
     }
 

@@ -1,7 +1,22 @@
 import express from 'express';
 import { GoogleGenAI } from '@google/genai';
 import crypto from 'node:crypto';
-import { db, initDatabase, hashPassword, verifyPassword, logAuditEvent } from './db';
+import { db, getSystemSetting, initDatabase, hashPassword, verifyPassword, logAuditEvent } from './db';
+import {
+  createAuthUser,
+  deleteAuthUser,
+  ensureAuthDatabase,
+  findAuthUser,
+  findAuthUserById,
+  getAuthSummary,
+  listAuthUsers,
+  listAuthSessionMetadata,
+  pruneExpiredAuthSessions,
+  updateAuthPassword,
+  updateAuthUserRole,
+  updateAuthUserStatus,
+  updateLastLogin,
+} from './authDb';
 import {
   requireAuth,
   requireAdmin,
@@ -10,8 +25,10 @@ import {
   AuthenticatedRequest,
 } from './auth';
 
-// Ensure database and primary tables/admin are initialized
+// Productivity records retain the existing SQLite implementation for now;
+// authentication and sessions use the persistent hosted database below.
 initDatabase();
+const authDatabaseReady = ensureAuthDatabase();
 
 let aiClient: GoogleGenAI | null = null;
 
@@ -64,8 +81,9 @@ app.get('/api/health', (_req, res) => {
 // ==========================================
 
 // Register
-app.post('/api/auth/register', (req, res) => {
+app.post('/api/auth/register', async (req, res) => {
   try {
+    await authDatabaseReady;
     const { name, email, password } = req.body;
 
     if (!name || !email || !password) {
@@ -77,25 +95,31 @@ app.post('/api/auth/register', (req, res) => {
       return res.status(400).json({ error: 'Please provide a valid email and a password of at least 6 characters.' });
     }
 
-    const existingQuery = db.prepare('SELECT id FROM users WHERE email = ?');
-    const existing = existingQuery.get(cleanEmail);
-    if (existing) {
-      return res.status(400).json({ error: 'An account with this email already exists.' });
+    if (getSystemSetting('registration_mode', 'open') === 'invite_only') {
+      return res.status(403).json({ error: 'Public registration is currently disabled. Please contact an administrator.' });
     }
 
-    const adminEmail = (process.env.ADMIN_EMAIL || 'mgshabbas@gmail.com').trim().toLowerCase();
+    const existing = await findAuthUser(cleanEmail);
+    if (existing) {
+      return res.status(409).json({ error: 'An account with this email already exists.' });
+    }
+
     const userId = `usr-${crypto.randomBytes(8).toString('hex')}`;
-    const role = cleanEmail === adminEmail ? 'admin' : 'user';
+    const role = 'user';
     const { hash, salt } = hashPassword(password);
     const now = new Date().toISOString();
 
-    const insertStmt = db.prepare(`
-      INSERT INTO users (id, name, email, password_hash, salt, role, status, created_at, last_login_at)
-      VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?)
-    `);
-    insertStmt.run(userId, String(name).trim(), cleanEmail, hash, salt, role, now, now);
+    await createAuthUser({
+      id: userId,
+      name: String(name).trim(),
+      email: cleanEmail,
+      passwordHash: hash,
+      salt,
+      role,
+      createdAt: now,
+    });
 
-    const token = createSession(userId);
+    const token = await createSession(userId);
 
     return res.json({
       token,
@@ -116,8 +140,9 @@ app.post('/api/auth/register', (req, res) => {
 });
 
 // Login
-app.post('/api/auth/login', (req, res) => {
+app.post('/api/auth/login', async (req, res) => {
   try {
+    await authDatabaseReady;
     const { email, password } = req.body;
 
     if (!email || !password) {
@@ -125,8 +150,7 @@ app.post('/api/auth/login', (req, res) => {
     }
 
     const cleanEmail = String(email).trim().toLowerCase();
-    const userQuery = db.prepare('SELECT * FROM users WHERE email = ?');
-    const user = userQuery.get(cleanEmail) as any;
+    const user = await findAuthUser(cleanEmail);
 
     if (!user) {
       return res.status(401).json({ error: 'Invalid email or password.' });
@@ -142,9 +166,9 @@ app.post('/api/auth/login', (req, res) => {
     }
 
     const now = new Date().toISOString();
-    db.prepare('UPDATE users SET last_login_at = ? WHERE id = ?').run(now, user.id);
+    await updateLastLogin(user.id, now);
 
-    const token = createSession(user.id);
+    const token = await createSession(user.id);
 
     return res.json({
       token,
@@ -165,10 +189,10 @@ app.post('/api/auth/login', (req, res) => {
 });
 
 // Logout
-app.post('/api/auth/logout', requireAuth, (req: AuthenticatedRequest, res) => {
+app.post('/api/auth/logout', requireAuth, async (req: AuthenticatedRequest, res) => {
   try {
     if (req.token) {
-      deleteSession(req.token);
+      await deleteSession(req.token);
     }
     return res.json({ success: true });
   } catch (err: any) {
@@ -182,20 +206,21 @@ app.get('/api/auth/me', requireAuth, (req: AuthenticatedRequest, res) => {
 });
 
 // Change password
-app.post('/api/auth/change-password', requireAuth, (req: AuthenticatedRequest, res) => {
+app.post('/api/auth/change-password', requireAuth, async (req: AuthenticatedRequest, res) => {
   try {
+    await authDatabaseReady;
     const { currentPassword, newPassword } = req.body;
     if (!currentPassword || !newPassword || newPassword.length < 6) {
       return res.status(400).json({ error: 'Please provide current password and a new password with at least 6 characters.' });
     }
 
-    const userRow = db.prepare('SELECT * FROM users WHERE id = ?').get(req.user!.id) as any;
+    const userRow = await findAuthUser(req.user!.id);
     if (!userRow || !verifyPassword(currentPassword, userRow.password_hash, userRow.salt)) {
       return res.status(400).json({ error: 'Incorrect current password.' });
     }
 
     const { hash, salt } = hashPassword(newPassword);
-    db.prepare('UPDATE users SET password_hash = ?, salt = ? WHERE id = ?').run(hash, salt, req.user!.id);
+    await updateAuthPassword(req.user!.id, hash, salt);
     logAuditEvent('PASSWORD_CHANGED', req.user!.email, 'info', 'User changed their password.');
 
     return res.json({ success: true, message: 'Password updated successfully.' });
@@ -205,22 +230,23 @@ app.post('/api/auth/change-password', requireAuth, (req: AuthenticatedRequest, r
 });
 
 // Reset password by email (public reset)
-app.post('/api/auth/reset-password', (req, res) => {
+app.post('/api/auth/reset-password', async (req, res) => {
   try {
+    await authDatabaseReady;
     const { email, newPassword } = req.body;
     if (!email || !newPassword || newPassword.length < 6) {
       return res.status(400).json({ error: 'Valid email and new password (min 6 characters) required.' });
     }
 
     const cleanEmail = String(email).trim().toLowerCase();
-    const user = db.prepare('SELECT id FROM users WHERE email = ?').get(cleanEmail) as { id: string } | undefined;
+    const user = await findAuthUser(cleanEmail);
 
     if (!user) {
       return res.status(404).json({ error: 'No account found with that email address.' });
     }
 
     const { hash, salt } = hashPassword(newPassword);
-    db.prepare('UPDATE users SET password_hash = ?, salt = ? WHERE id = ?').run(hash, salt, user.id);
+    await updateAuthPassword(user.id, hash, salt);
     logAuditEvent('PASSWORD_RESET', cleanEmail, 'info', 'User reset password via self-service form.');
 
     return res.json({ success: true, message: 'Password updated successfully.' });
@@ -777,14 +803,17 @@ app.post('/api/personal/reset-data', requireAuth, (req: AuthenticatedRequest, re
 // ==========================================
 
 // Global Analytics Overview
-app.get('/api/admin/analytics', requireAdmin, (_req, res) => {
+app.get('/api/admin/analytics', requireAdmin, async (_req, res) => {
   try {
-    const totalUsersRow = db.prepare('SELECT count(*) as count FROM users').get() as { count: number };
-    const activeUsersRow = db.prepare("SELECT count(*) as count FROM users WHERE status = 'active'").get() as { count: number };
-    const inactiveUsersRow = db.prepare("SELECT count(*) as count FROM users WHERE status = 'deactivated'").get() as { count: number };
-
-    const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
-    const newUsersRow = db.prepare('SELECT count(*) as count FROM users WHERE created_at >= ?').get(sevenDaysAgo) as { count: number };
+    await authDatabaseReady;
+    const authSummary = await getAuthSummary();
+    let databaseHealthy = false;
+    try {
+      db.prepare('SELECT 1').get();
+      databaseHealthy = true;
+    } catch {
+      databaseHealthy = false;
+    }
 
     const activitiesRow = db.prepare("SELECT count(*) as total, sum(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed FROM activities").get() as { total: number; completed: number | null };
 
@@ -806,12 +835,19 @@ app.get('/api/admin/analytics', requireAdmin, (_req, res) => {
     }
 
     return res.json({
-      totalUsers: totalUsersRow.count,
-      activeUsers: activeUsersRow.count,
-      inactiveUsers: inactiveUsersRow.count,
-      newUsersPast7Days: newUsersRow.count,
+      totalUsers: authSummary.totalUsers,
+      activeUsers: authSummary.activeUsers,
+      inactiveUsers: authSummary.inactiveUsers,
+      newUsersPast7Days: authSummary.newUsersPast7Days,
+      adminCount: authSummary.adminCount,
       totalActivitiesLogged: totalActivities,
       systemExecutionRate,
+      newUsersThisWeek: authSummary.newUsersPast7Days,
+      totalActivitiesCreated: totalActivities,
+      totalActivitiesCompleted: completedActivities,
+      averageCompletionRate: systemExecutionRate,
+      systemStatus: databaseHealthy ? 'Healthy & Operational' : 'Database unavailable',
+      databaseHealthy,
       weeklyTrend: sevenDaysStats,
     });
   } catch (err: any) {
@@ -820,35 +856,14 @@ app.get('/api/admin/analytics', requireAdmin, (_req, res) => {
 });
 
 // User Management List
-app.get('/api/admin/users', requireAdmin, (req, res) => {
+app.get('/api/admin/users', requireAdmin, async (req, res) => {
   try {
-    const { search, status, role } = req.query;
-    let query = `
-      SELECT
-        u.id, u.name, u.email, u.role, u.status, u.created_at, u.last_login_at,
-        (SELECT count(*) FROM activities WHERE user_id = u.id) as activity_count,
-        (SELECT count(*) FROM goals WHERE user_id = u.id) as goal_count
-      FROM users u
-      WHERE 1=1
-    `;
-    const params: any[] = [];
-
-    if (search) {
-      query += ' AND (u.name LIKE ? OR u.email LIKE ?)';
-      params.push(`%${search}%`, `%${search}%`);
-    }
-    if (status && status !== 'all') {
-      query += ' AND u.status = ?';
-      params.push(status);
-    }
-    if (role && role !== 'all') {
-      query += ' AND u.role = ?';
-      params.push(role);
-    }
-
-    query += ' ORDER BY u.created_at DESC';
-
-    const rows = db.prepare(query).all(...params) as any[];
+    await authDatabaseReady;
+    const rows = await listAuthUsers({
+      search: String(req.query.search || ''),
+      status: String(req.query.status || ''),
+      role: String(req.query.role || ''),
+    });
     const users = rows.map((r) => ({
       id: r.id,
       name: r.name,
@@ -868,8 +883,9 @@ app.get('/api/admin/users', requireAdmin, (req, res) => {
 });
 
 // Toggle User Status (Active / Deactivated)
-app.put('/api/admin/users/:id/status', requireAdmin, (req: AuthenticatedRequest, res) => {
+app.put('/api/admin/users/:id/status', requireAdmin, async (req: AuthenticatedRequest, res) => {
   try {
+    await authDatabaseReady;
     const { id } = req.params;
     const { status } = req.body;
 
@@ -877,7 +893,7 @@ app.put('/api/admin/users/:id/status', requireAdmin, (req: AuthenticatedRequest,
       return res.status(400).json({ error: 'Invalid status value.' });
     }
 
-    const targetUser = db.prepare('SELECT id, email, role FROM users WHERE id = ?').get(id) as any;
+    const targetUser = await findAuthUserById(id);
     if (!targetUser) {
       return res.status(404).json({ error: 'User not found.' });
     }
@@ -886,17 +902,8 @@ app.put('/api/admin/users/:id/status', requireAdmin, (req: AuthenticatedRequest,
       return res.status(400).json({ error: 'You cannot change your own status.' });
     }
 
-    const adminEmail = (process.env.ADMIN_EMAIL || 'mgshabbas@gmail.com').trim().toLowerCase();
-    if (targetUser.email === adminEmail) {
-      return res.status(403).json({ error: 'The primary system administrator account cannot be deactivated.' });
-    }
-
-    db.prepare('UPDATE users SET status = ? WHERE id = ?').run(status, id);
+    await updateAuthUserStatus(id, status);
     logAuditEvent('USER_STATUS_CHANGED', req.user!.email, 'warn', `Updated user ${targetUser.email} status to ${status}.`);
-
-    if (status === 'deactivated') {
-      db.prepare('DELETE FROM sessions WHERE user_id = ?').run(id);
-    }
 
     return res.json({ success: true, id, status });
   } catch (err: any) {
@@ -905,10 +912,11 @@ app.put('/api/admin/users/:id/status', requireAdmin, (req: AuthenticatedRequest,
 });
 
 // Delete User
-app.delete('/api/admin/users/:id', requireAdmin, (req: AuthenticatedRequest, res) => {
+app.delete('/api/admin/users/:id', requireAdmin, async (req: AuthenticatedRequest, res) => {
   try {
+    await authDatabaseReady;
     const { id } = req.params;
-    const targetUser = db.prepare('SELECT id, email, role FROM users WHERE id = ?').get(id) as any;
+    const targetUser = await findAuthUserById(id);
 
     if (!targetUser) {
       return res.status(404).json({ error: 'User not found.' });
@@ -918,12 +926,13 @@ app.delete('/api/admin/users/:id', requireAdmin, (req: AuthenticatedRequest, res
       return res.status(400).json({ error: 'You cannot delete your own account from here.' });
     }
 
-    const adminEmail = (process.env.ADMIN_EMAIL || 'mgshabbas@gmail.com').trim().toLowerCase();
-    if (targetUser.email === adminEmail) {
-      return res.status(403).json({ error: 'The primary system administrator account cannot be deleted.' });
-    }
-
-    db.prepare('DELETE FROM users WHERE id = ?').run(id);
+    await deleteAuthUser(id);
+    db.prepare('DELETE FROM activities WHERE user_id = ?').run(id);
+    db.prepare('DELETE FROM goals WHERE user_id = ?').run(id);
+    db.prepare('DELETE FROM weekly_targets WHERE user_id = ?').run(id);
+    db.prepare('DELETE FROM week_plans WHERE user_id = ?').run(id);
+    db.prepare('DELETE FROM historical_weeks WHERE user_id = ?').run(id);
+    db.prepare('DELETE FROM categories WHERE user_id = ?').run(id);
     logAuditEvent('USER_DELETED', req.user!.email, 'warn', `Deleted user account ${targetUser.email}.`);
 
     return res.json({ success: true, id });
@@ -933,8 +942,9 @@ app.delete('/api/admin/users/:id', requireAdmin, (req: AuthenticatedRequest, res
 });
 
 // Create User (Admin manual provisioning)
-app.post('/api/admin/users', requireAdmin, (req: AuthenticatedRequest, res) => {
+app.post('/api/admin/users', requireAdmin, async (req: AuthenticatedRequest, res) => {
   try {
+    await authDatabaseReady;
     const { name, email, password, role } = req.body;
 
     if (!name || !email || !password) {
@@ -942,20 +952,28 @@ app.post('/api/admin/users', requireAdmin, (req: AuthenticatedRequest, res) => {
     }
 
     const cleanEmail = String(email).trim().toLowerCase();
-    const existing = db.prepare('SELECT id FROM users WHERE email = ?').get(cleanEmail);
+    const existing = await findAuthUser(cleanEmail);
     if (existing) {
       return res.status(400).json({ error: 'A user with this email already exists.' });
     }
 
     const userId = `usr-${crypto.randomBytes(8).toString('hex')}`;
     const userRole = role === 'admin' ? 'admin' : 'user';
+    if (userRole === 'admin' && (await getAuthSummary()).adminCount > 0) {
+      return res.status(409).json({ error: 'Only one administrator account is permitted.' });
+    }
     const { hash, salt } = hashPassword(password);
     const now = new Date().toISOString();
 
-    db.prepare(`
-      INSERT INTO users (id, name, email, password_hash, salt, role, status, created_at, last_login_at)
-      VALUES (?, ?, ?, ?, ?, ?, 'active', ?, NULL)
-    `).run(userId, String(name).trim(), cleanEmail, hash, salt, userRole, now);
+    await createAuthUser({
+      id: userId,
+      name: String(name).trim(),
+      email: cleanEmail,
+      passwordHash: hash,
+      salt,
+      role: userRole,
+      createdAt: now,
+    });
 
     logAuditEvent('USER_CREATED_BY_ADMIN', req.user!.email, 'info', `Provisioned new user: ${cleanEmail} (${userRole})`);
 
@@ -978,8 +996,9 @@ app.post('/api/admin/users', requireAdmin, (req: AuthenticatedRequest, res) => {
 });
 
 // Change User Role
-app.put('/api/admin/users/:id/role', requireAdmin, (req: AuthenticatedRequest, res) => {
+app.put('/api/admin/users/:id/role', requireAdmin, async (req: AuthenticatedRequest, res) => {
   try {
+    await authDatabaseReady;
     const { id } = req.params;
     const { role } = req.body;
 
@@ -987,17 +1006,23 @@ app.put('/api/admin/users/:id/role', requireAdmin, (req: AuthenticatedRequest, r
       return res.status(400).json({ error: 'Invalid role value.' });
     }
 
-    const targetUser = db.prepare('SELECT id, email, role FROM users WHERE id = ?').get(id) as any;
+    const targetUser = await findAuthUserById(id);
     if (!targetUser) {
       return res.status(404).json({ error: 'User not found.' });
     }
 
-    const adminEmail = (process.env.ADMIN_EMAIL || 'mgshabbas@gmail.com').trim().toLowerCase();
-    if (targetUser.email === adminEmail && role !== 'admin') {
-      return res.status(403).json({ error: 'Cannot demote the primary administrator account.' });
+    if (targetUser.id === req.user!.id) {
+      return res.status(400).json({ error: 'You cannot modify your own administrative role.' });
+    }
+    const authSummary = await getAuthSummary();
+    if (role === 'admin' && targetUser.role !== 'admin' && authSummary.adminCount > 0) {
+      return res.status(409).json({ error: 'Only one administrator account is permitted.' });
+    }
+    if (role === 'user' && targetUser.role === 'admin' && authSummary.adminCount <= 1) {
+      return res.status(400).json({ error: 'The administrator account cannot be demoted.' });
     }
 
-    db.prepare('UPDATE users SET role = ? WHERE id = ?').run(role, id);
+    await updateAuthUserRole(id, role);
     logAuditEvent('ROLE_CHANGED', req.user!.email, 'warn', `Changed role of ${targetUser.email} to ${role}.`);
 
     return res.json({ success: true, id, role });
@@ -1007,8 +1032,9 @@ app.put('/api/admin/users/:id/role', requireAdmin, (req: AuthenticatedRequest, r
 });
 
 // Reset User Password
-app.post('/api/admin/users/:id/reset-password', requireAdmin, (req: AuthenticatedRequest, res) => {
+app.post('/api/admin/users/:id/reset-password', requireAdmin, async (req: AuthenticatedRequest, res) => {
   try {
+    await authDatabaseReady;
     const { id } = req.params;
     const { password } = req.body;
 
@@ -1016,13 +1042,13 @@ app.post('/api/admin/users/:id/reset-password', requireAdmin, (req: Authenticate
       return res.status(400).json({ error: 'New password must have at least 6 characters.' });
     }
 
-    const targetUser = db.prepare('SELECT id, email FROM users WHERE id = ?').get(id) as any;
+    const targetUser = await findAuthUserById(id);
     if (!targetUser) {
       return res.status(404).json({ error: 'User not found.' });
     }
 
     const { hash, salt } = hashPassword(password);
-    db.prepare('UPDATE users SET password_hash = ?, salt = ? WHERE id = ?').run(hash, salt, id);
+    await updateAuthPassword(id, hash, salt);
     logAuditEvent('ADMIN_RESET_PASSWORD', req.user!.email, 'warn', `Admin reset password for ${targetUser.email}.`);
 
     return res.json({ success: true, message: `Password for ${targetUser.email} has been updated.` });
@@ -1032,10 +1058,10 @@ app.post('/api/admin/users/:id/reset-password', requireAdmin, (req: Authenticate
 });
 
 // Data Summary
-app.get('/api/admin/data-summary', requireAdmin, (_req, res) => {
+app.get('/api/admin/data-summary', requireAdmin, async (_req, res) => {
   try {
-    const userCount = (db.prepare('SELECT count(*) as count FROM users').get() as any).count;
-    const sessionCount = (db.prepare('SELECT count(*) as count FROM sessions').get() as any).count;
+    await authDatabaseReady;
+    const authSummary = await getAuthSummary();
     const activityCount = (db.prepare('SELECT count(*) as count FROM activities').get() as any).count;
     const goalCount = (db.prepare('SELECT count(*) as count FROM goals').get() as any).count;
     const targetCount = (db.prepare('SELECT count(*) as count FROM weekly_targets').get() as any).count;
@@ -1045,8 +1071,8 @@ app.get('/api/admin/data-summary', requireAdmin, (_req, res) => {
     const logCount = (db.prepare('SELECT count(*) as count FROM audit_logs').get() as any).count;
 
     return res.json({
-      users: userCount,
-      sessions: sessionCount,
+      users: authSummary.totalUsers,
+      sessions: authSummary.sessionCount,
       activities: activityCount,
       goals: goalCount,
       weeklyTargets: targetCount,
@@ -1054,8 +1080,20 @@ app.get('/api/admin/data-summary', requireAdmin, (_req, res) => {
       historicalWeeks: historyCount,
       categories: categoryCount,
       auditLogs: logCount,
-      databaseType: 'SQLite Embedded Engine (WAL Mode)',
-      storageHealth: 'Healthy (Zero Fragmentation)',
+      tables: [
+        { name: 'auth_users', label: 'Registered Users', count: authSummary.totalUsers },
+        { name: 'auth_sessions', label: 'Active Sessions', count: authSummary.sessionCount },
+        { name: 'activities', label: 'Activities', count: activityCount },
+        { name: 'goals', label: 'Goals', count: goalCount },
+        { name: 'weekly_targets', label: 'Weekly Targets', count: targetCount },
+        { name: 'week_plans', label: 'Week Plans', count: planCount },
+        { name: 'historical_weeks', label: 'Historical Weeks', count: historyCount },
+        { name: 'categories', label: 'Categories', count: categoryCount },
+        { name: 'audit_logs', label: 'Audit Logs', count: logCount },
+      ],
+      totalRecords: authSummary.totalUsers + authSummary.sessionCount + activityCount + goalCount + targetCount + planCount + historyCount + categoryCount + logCount,
+      databaseType: process.env.DATABASE_URL ? 'Neon Postgres' : 'SQLite Local Development',
+      storageHealth: process.env.DATABASE_URL ? 'Persistent hosted database' : 'Local development storage',
     });
   } catch (err: any) {
     return res.status(500).json({ error: 'Failed to load database summary.' });
@@ -1063,32 +1101,41 @@ app.get('/api/admin/data-summary', requireAdmin, (_req, res) => {
 });
 
 // Export Database JSON Backup
-app.get('/api/admin/export-backup', requireAdmin, (req: AuthenticatedRequest, res) => {
+app.get('/api/admin/export-backup', requireAdmin, async (req: AuthenticatedRequest, res) => {
   try {
-    const users = db.prepare('SELECT id, name, email, role, status, created_at, last_login_at FROM users').all();
+    await authDatabaseReady;
+    const users = (await listAuthUsers()).map(({ id, name, email, role, status, created_at, last_login_at }) => ({
+      id, name, email, role, status, createdAt: created_at, lastLoginAt: last_login_at,
+    }));
+    const sessions = await listAuthSessionMetadata();
     const activities = db.prepare('SELECT * FROM activities').all();
     const goals = db.prepare('SELECT * FROM goals').all();
-    const targets = db.prepare('SELECT * FROM weekly_targets').all();
-    const plans = db.prepare('SELECT * FROM week_plans').all();
-    const history = db.prepare('SELECT * FROM historical_weeks').all();
+    const weeklyTargets = db.prepare('SELECT * FROM weekly_targets').all();
+    const weekPlans = db.prepare('SELECT * FROM week_plans').all();
+    const historicalWeeks = db.prepare('SELECT * FROM historical_weeks').all();
     const categories = db.prepare('SELECT * FROM categories').all();
     const settings = db.prepare('SELECT * FROM system_settings').all();
+    const auditLogs = db.prepare('SELECT * FROM audit_logs').all();
 
     logAuditEvent('DATA_BACKUP_EXPORTED', req.user!.email, 'info', 'Generated full JSON backup of database records.');
 
+    res.setHeader('Content-Disposition', `attachment; filename="mnemora-backup-${new Date().toISOString().slice(0, 10)}.json"`);
     return res.json({
       exportedAt: new Date().toISOString(),
       system: 'FOCUS OS Multi-User Platform',
       version: '2.0.0',
       database: {
         users,
+        sessions,
         activities,
         goals,
-        weeklyTargets: targets,
-        weekPlans: plans,
-        historicalWeeks: history,
+        weeklyTargets,
+        weekPlans,
+        historicalWeeks,
         categories,
         settings,
+        auditLogs,
+        note: 'Authentication passwords, password hashes, salts, session tokens, and API secrets are excluded.',
       },
     });
   } catch (err: any) {
@@ -1097,10 +1144,9 @@ app.get('/api/admin/export-backup', requireAdmin, (req: AuthenticatedRequest, re
 });
 
 // Vacuum & Optimize Database
-app.post('/api/admin/vacuum', requireAdmin, (req: AuthenticatedRequest, res) => {
+app.post('/api/admin/vacuum', requireAdmin, async (req: AuthenticatedRequest, res) => {
   try {
-    const now = new Date().toISOString();
-    const deleteResult = db.prepare('DELETE FROM sessions WHERE expires_at < ?').run(now);
+    const expiredSessionsRemoved = await pruneExpiredAuthSessions();
 
     try {
       db.exec('PRAGMA optimize;');
@@ -1108,12 +1154,12 @@ app.post('/api/admin/vacuum', requireAdmin, (req: AuthenticatedRequest, res) => 
       // Non-fatal
     }
 
-    logAuditEvent('DATABASE_OPTIMIZED', req.user!.email, 'info', `Pruned ${deleteResult.changes} expired user sessions.`);
+    logAuditEvent('DATABASE_OPTIMIZED', req.user!.email, 'info', `Pruned ${expiredSessionsRemoved} expired authentication sessions.`);
 
     return res.json({
       success: true,
       message: 'Database optimization complete. Expired sessions purged.',
-      expiredSessionsRemoved: deleteResult.changes,
+      expiredSessionsRemoved,
     });
   } catch (err: any) {
     return res.status(500).json({ error: 'Failed to optimize database.' });
@@ -1121,7 +1167,7 @@ app.post('/api/admin/vacuum', requireAdmin, (req: AuthenticatedRequest, res) => 
 });
 
 // System Activity & Execution Reports
-app.get('/api/admin/reports', requireAdmin, (_req, res) => {
+app.get('/api/admin/reports', requireAdmin, (req: AuthenticatedRequest, res) => {
   try {
     const priorityStats = db.prepare(`
       SELECT priority, count(*) as count, sum(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed
@@ -1142,7 +1188,8 @@ app.get('/api/admin/reports', requireAdmin, (_req, res) => {
       SELECT
         u.id, u.name, u.email,
         count(a.id) as total_activities,
-        sum(CASE WHEN a.status = 'completed' THEN 1 ELSE 0 END) as completed_activities
+        sum(CASE WHEN a.status = 'completed' THEN 1 ELSE 0 END) as completed_activities,
+        sum(CASE WHEN a.is_on_time = 1 THEN 1 ELSE 0 END) as on_time_activities
       FROM users u
       LEFT JOIN activities a ON a.user_id = u.id
       GROUP BY u.id
@@ -1150,24 +1197,29 @@ app.get('/api/admin/reports', requireAdmin, (_req, res) => {
       LIMIT 8
     `).all() as any[];
 
+    logAuditEvent('REPORT_GENERATED', req.user!.email, 'info', 'Generated execution report summary.');
+
     return res.json({
-      priorityBreakdown: priorityStats.map((p) => ({
+      priorityStats: priorityStats.map((p) => ({
         priority: p.priority,
-        count: p.count,
-        completionRate: p.count > 0 ? Math.round(((p.completed || 0) / p.count) * 100) : 0,
+        total: p.count,
+        completed: p.completed || 0,
       })),
-      categoryBreakdown: categoryStats.map((c) => ({
+      categoryStats: categoryStats.map((c) => ({
         category: c.category,
-        count: c.count,
+        total: c.count,
         completed: c.completed || 0,
       })),
       leaderboard: userRankings.map((u) => ({
+        id: u.id,
         name: u.name,
         email: u.email,
         total: u.total_activities,
         completed: u.completed_activities || 0,
         rate: u.total_activities > 0 ? Math.round(((u.completed_activities || 0) / u.total_activities) * 100) : 0,
+        onTimeRate: u.total_activities > 0 ? Math.round(((u.on_time_activities || 0) / u.total_activities) * 100) : 0,
       })),
+      generatedAt: new Date().toISOString(),
     });
   } catch (err: any) {
     return res.status(500).json({ error: 'Failed to generate reports.' });
@@ -1228,7 +1280,15 @@ app.get('/api/admin/settings', requireAdmin, (_req, res) => {
     for (const r of rows) {
       settings[r.key] = r.value;
     }
-    return res.json({ settings });
+    return res.json({
+      settings,
+      environment: {
+        nodeVersion: process.version,
+        port: Number(process.env.PORT || 3000),
+        databaseMode: process.env.DATABASE_URL ? 'Neon Postgres auth + SQLite local data' : 'SQLite local development',
+        uptimeSeconds: Math.floor(process.uptime()),
+      },
+    });
   } catch (err: any) {
     return res.status(500).json({ error: 'Failed to retrieve system settings.' });
   }
@@ -1258,26 +1318,6 @@ app.post('/api/admin/settings', requireAdmin, (req: AuthenticatedRequest, res) =
     return res.json({ success: true, message: 'Application settings saved successfully.' });
   } catch (err: any) {
     return res.status(500).json({ error: 'Failed to update settings.' });
-  }
-});
-
-// Self-service Elevation for preview/testing: promote current user to admin
-app.post('/api/admin/elevate-me', requireAuth, (req: AuthenticatedRequest, res) => {
-  try {
-    const userId = req.user!.id;
-    db.prepare("UPDATE users SET role = 'admin' WHERE id = ?").run(userId);
-    logAuditEvent('USER_SELF_ELEVATED', req.user!.email, 'warn', `User ${req.user!.email} elevated account to administrator.`);
-
-    return res.json({
-      success: true,
-      user: {
-        ...req.user!,
-        role: 'admin',
-      },
-      message: 'Account successfully upgraded to Administrator.',
-    });
-  } catch (err: any) {
-    return res.status(500).json({ error: 'Failed to elevate account.' });
   }
 });
 

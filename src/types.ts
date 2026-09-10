@@ -143,6 +143,8 @@ export interface AdminAnalyticsData {
   totalActivitiesCreated: number;
   totalActivitiesCompleted: number;
   averageCompletionRate: number;
+  systemStatus: string;
+  databaseHealthy: boolean;
 }
 
 export type MainSection =
