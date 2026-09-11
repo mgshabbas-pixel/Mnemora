@@ -4,8 +4,16 @@ import { db, getSystemSetting } from './db';
 
 const databaseUrl = process.env.DATABASE_URL;
 
-const sql = databaseUrl ? neon(databaseUrl) : null;
-const localDb = !sql && !process.env.VERCEL ? db : null;
+const isPlaceholderUrl = Boolean(
+  databaseUrl && (
+    databaseUrl.includes('user:password@host') ||
+    databaseUrl.includes('@host/') ||
+    databaseUrl.includes('host/database')
+  )
+);
+
+let sql = databaseUrl && !isPlaceholderUrl ? neon(databaseUrl) : null;
+let localDb = !sql || !process.env.VERCEL ? db : null;
 let schemaPromise: Promise<void> | null = null;
 
 function requireDatabase() {
@@ -28,6 +36,38 @@ export interface AuthUserRow {
 }
 
 export async function initAuthDatabase(): Promise<void> {
+  if (sql) {
+    try {
+      await sql`
+        CREATE TABLE IF NOT EXISTS auth_users (
+          id TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          email TEXT UNIQUE NOT NULL,
+          password_hash TEXT NOT NULL,
+          salt TEXT NOT NULL,
+          role TEXT NOT NULL DEFAULT 'user' CHECK (role IN ('admin', 'user')),
+          status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'deactivated')),
+          created_at TIMESTAMPTZ NOT NULL,
+          last_login_at TIMESTAMPTZ
+        )
+      `;
+
+      await sql`
+        CREATE TABLE IF NOT EXISTS auth_sessions (
+          token TEXT PRIMARY KEY,
+          user_id TEXT NOT NULL REFERENCES auth_users(id) ON DELETE CASCADE,
+          created_at TIMESTAMPTZ NOT NULL,
+          expires_at TIMESTAMPTZ NOT NULL
+        )
+      `;
+      return;
+    } catch (err: any) {
+      console.warn('[AI Studio] Remote database connection failed, falling back to local SQLite:', err?.message || err);
+      sql = null;
+      localDb = db;
+    }
+  }
+
   if (localDb) {
     localDb.exec(`
       CREATE TABLE IF NOT EXISTS auth_users (
@@ -49,32 +89,7 @@ export async function initAuthDatabase(): Promise<void> {
         FOREIGN KEY(user_id) REFERENCES auth_users(id) ON DELETE CASCADE
       );
     `);
-    return;
   }
-  if (!sql) return;
-
-  await sql`
-    CREATE TABLE IF NOT EXISTS auth_users (
-      id TEXT PRIMARY KEY,
-      name TEXT NOT NULL,
-      email TEXT UNIQUE NOT NULL,
-      password_hash TEXT NOT NULL,
-      salt TEXT NOT NULL,
-      role TEXT NOT NULL DEFAULT 'user' CHECK (role IN ('admin', 'user')),
-      status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'deactivated')),
-      created_at TIMESTAMPTZ NOT NULL,
-      last_login_at TIMESTAMPTZ
-    )
-  `;
-
-  await sql`
-    CREATE TABLE IF NOT EXISTS auth_sessions (
-      token TEXT PRIMARY KEY,
-      user_id TEXT NOT NULL REFERENCES auth_users(id) ON DELETE CASCADE,
-      created_at TIMESTAMPTZ NOT NULL,
-      expires_at TIMESTAMPTZ NOT NULL
-    )
-  `;
 }
 
 export async function findAuthUser(email: string): Promise<AuthUserRow | null> {
