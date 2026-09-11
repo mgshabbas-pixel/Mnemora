@@ -6,7 +6,7 @@ import crypto from 'node:crypto';
 
 let DatabaseSyncClass: any = null;
 try {
-  const req = typeof require !== 'undefined' ? require : createRequire(process.cwd() + '/package.json');
+  const req = typeof require !== 'undefined' ? require : createRequire(import.meta.url);
   DatabaseSyncClass = req('node:sqlite')?.DatabaseSync || null;
 } catch {
   DatabaseSyncClass = null;

@@ -1284,7 +1284,7 @@ app.get('/api/admin/settings', requireAdmin, (_req, res) => {
       settings,
       environment: {
         nodeVersion: process.version,
-        port: Number(process.env.PORT || 3000),
+        port: 3000,
         databaseMode: process.env.DATABASE_URL ? 'Neon Postgres auth + SQLite local data' : 'SQLite local development',
         uptimeSeconds: Math.floor(process.uptime()),
       },

@@ -170,19 +170,35 @@ export async function createAuthUser(input: {
 }
 
 export async function updateLastLogin(id: string, timestamp: string): Promise<void> {
+  if (sql) {
+    try {
+      await sql`UPDATE auth_users SET last_login_at = ${timestamp} WHERE id = ${id}`;
+      return;
+    } catch (err: any) {
+      console.warn('[AI Studio] Remote auth updateLastLogin fallback:', err?.message || err);
+      sql = null;
+      localDb = db;
+    }
+  }
   if (localDb) {
     localDb.prepare('UPDATE auth_users SET last_login_at = ? WHERE id = ?').run(timestamp, id);
-    return;
   }
-  await requireDatabase()`UPDATE auth_users SET last_login_at = ${timestamp} WHERE id = ${id}`;
 }
 
 export async function updateAuthPassword(id: string, passwordHash: string, salt: string): Promise<void> {
+  if (sql) {
+    try {
+      await sql`UPDATE auth_users SET password_hash = ${passwordHash}, salt = ${salt} WHERE id = ${id}`;
+      return;
+    } catch (err: any) {
+      console.warn('[AI Studio] Remote auth updateAuthPassword fallback:', err?.message || err);
+      sql = null;
+      localDb = db;
+    }
+  }
   if (localDb) {
     localDb.prepare('UPDATE auth_users SET password_hash = ?, salt = ? WHERE id = ?').run(passwordHash, salt, id);
-    return;
   }
-  await requireDatabase()`UPDATE auth_users SET password_hash = ${passwordHash}, salt = ${salt} WHERE id = ${id}`;
 }
 
 export async function createAuthSession(userId: string): Promise<string> {
@@ -190,40 +206,65 @@ export async function createAuthSession(userId: string): Promise<string> {
   const createdAt = new Date().toISOString();
   const durationDays = Number(getSystemSetting('session_duration_days', '30')) || 30;
   const expiresAt = new Date(Date.now() + durationDays * 24 * 60 * 60 * 1000).toISOString();
+  if (sql) {
+    try {
+      await sql`
+        INSERT INTO auth_sessions (token, user_id, created_at, expires_at)
+        VALUES (${token}, ${userId}, ${createdAt}, ${expiresAt})
+      `;
+      return token;
+    } catch (err: any) {
+      console.warn('[AI Studio] Remote auth createAuthSession fallback:', err?.message || err);
+      sql = null;
+      localDb = db;
+    }
+  }
   if (localDb) {
     localDb.prepare('INSERT INTO auth_sessions (token, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)').run(token, userId, createdAt, expiresAt);
-    return token;
   }
-  await requireDatabase()`
-    INSERT INTO auth_sessions (token, user_id, created_at, expires_at)
-    VALUES (${token}, ${userId}, ${createdAt}, ${expiresAt})
-  `;
   return token;
 }
 
 export async function deleteAuthSession(token: string): Promise<void> {
+  if (sql) {
+    try {
+      await sql`DELETE FROM auth_sessions WHERE token = ${token}`;
+      return;
+    } catch (err: any) {
+      console.warn('[AI Studio] Remote auth deleteAuthSession fallback:', err?.message || err);
+      sql = null;
+      localDb = db;
+    }
+  }
   if (localDb) {
     localDb.prepare('DELETE FROM auth_sessions WHERE token = ?').run(token);
-    return;
   }
-  await requireDatabase()`DELETE FROM auth_sessions WHERE token = ${token}`;
 }
 
 export async function findUserBySession(token: string): Promise<(AuthUserRow & { expires_at: string }) | null> {
-  if (localDb) {
-    return (localDb.prepare(`
-      SELECT u.*, s.expires_at
-      FROM auth_sessions s JOIN auth_users u ON u.id = s.user_id
-      WHERE s.token = ? LIMIT 1
-    `).get(token) as unknown as (AuthUserRow & { expires_at: string }) | undefined) ?? null;
+  if (sql) {
+    try {
+      const rows = await sql`
+        SELECT u.id, u.name, u.email, u.password_hash, u.salt, u.role, u.status,
+               u.created_at::text, u.last_login_at::text, s.expires_at::text
+        FROM auth_sessions s JOIN auth_users u ON u.id = s.user_id
+        WHERE s.token = ${token} LIMIT 1
+      `;
+      return (rows[0] as (AuthUserRow & { expires_at: string }) | undefined) ?? null;
+    } catch (err: any) {
+      console.warn('[AI Studio] Remote auth findUserBySession fallback:', err?.message || err);
+      sql = null;
+      localDb = db;
+    }
   }
-  const rows = await requireDatabase()`
-    SELECT u.id, u.name, u.email, u.password_hash, u.salt, u.role, u.status,
-           u.created_at::text, u.last_login_at::text, s.expires_at::text
-    FROM auth_sessions s JOIN auth_users u ON u.id = s.user_id
-    WHERE s.token = ${token} LIMIT 1
-  `;
-  return (rows[0] as (AuthUserRow & { expires_at: string }) | undefined) ?? null;
+  if (localDb) {
+    const session = localDb.prepare('SELECT * FROM auth_sessions WHERE token = ? LIMIT 1').get(token) as any;
+    if (!session) return null;
+    const user = localDb.prepare('SELECT * FROM auth_users WHERE id = ? LIMIT 1').get(session.user_id) as any;
+    if (!user) return null;
+    return { ...user, expires_at: session.expires_at };
+  }
+  return null;
 }
 
 export async function provisionConfiguredAdmin(): Promise<void> {
