@@ -1,8 +1,5 @@
-import { createRequire } from 'node:module';
+import app from '../server/app';
 import type { IncomingMessage, ServerResponse } from 'node:http';
-
-const reqLoader = createRequire(import.meta.url);
-const app = reqLoader('./index.cjs').default || reqLoader('./index.cjs');
 
 export default function handler(req: IncomingMessage, res: ServerResponse) {
   // Ensure req.url matches the client's actual request URL if Vercel rewrote it
