@@ -13,7 +13,7 @@ const isPlaceholderUrl = Boolean(
 );
 
 let sql = databaseUrl && !isPlaceholderUrl ? neon(databaseUrl) : null;
-let localDb = !sql || !process.env.VERCEL ? db : null;
+let localDb = !sql ? db : null;
 let schemaPromise: Promise<void> | null = null;
 
 function requireDatabase() {
