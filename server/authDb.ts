@@ -93,27 +93,45 @@ export async function initAuthDatabase(): Promise<void> {
 }
 
 export async function findAuthUser(email: string): Promise<AuthUserRow | null> {
+  if (sql) {
+    try {
+      const rows = await sql`
+        SELECT id, name, email, password_hash, salt, role, status,
+               created_at::text, last_login_at::text
+        FROM auth_users WHERE email = ${email} LIMIT 1
+      `;
+      return (rows[0] as AuthUserRow | undefined) ?? null;
+    } catch (err: any) {
+      console.warn('[AI Studio] Remote auth query fallback:', err?.message || err);
+      sql = null;
+      localDb = db;
+    }
+  }
   if (localDb) {
     return (localDb.prepare('SELECT * FROM auth_users WHERE email = ? LIMIT 1').get(email) as unknown as AuthUserRow | undefined) ?? null;
   }
-  const rows = await requireDatabase()`
-    SELECT id, name, email, password_hash, salt, role, status,
-           created_at::text, last_login_at::text
-    FROM auth_users WHERE email = ${email} LIMIT 1
-  `;
-  return (rows[0] as AuthUserRow | undefined) ?? null;
+  return null;
 }
 
 export async function findAuthUserById(id: string): Promise<AuthUserRow | null> {
+  if (sql) {
+    try {
+      const rows = await sql`
+        SELECT id, name, email, password_hash, salt, role, status,
+               created_at::text, last_login_at::text
+        FROM auth_users WHERE id = ${id} LIMIT 1
+      `;
+      return (rows[0] as AuthUserRow | undefined) ?? null;
+    } catch (err: any) {
+      console.warn('[AI Studio] Remote auth query fallback:', err?.message || err);
+      sql = null;
+      localDb = db;
+    }
+  }
   if (localDb) {
     return (localDb.prepare('SELECT * FROM auth_users WHERE id = ? LIMIT 1').get(id) as unknown as AuthUserRow | undefined) ?? null;
   }
-  const rows = await requireDatabase()`
-    SELECT id, name, email, password_hash, salt, role, status,
-           created_at::text, last_login_at::text
-    FROM auth_users WHERE id = ${id} LIMIT 1
-  `;
-  return (rows[0] as AuthUserRow | undefined) ?? null;
+  return null;
 }
 
 export async function createAuthUser(input: {
@@ -125,6 +143,19 @@ export async function createAuthUser(input: {
   role: 'admin' | 'user';
   createdAt: string;
 }): Promise<void> {
+  if (sql) {
+    try {
+      await sql`
+        INSERT INTO auth_users (id, name, email, password_hash, salt, role, status, created_at, last_login_at)
+        VALUES (${input.id}, ${input.name}, ${input.email}, ${input.passwordHash}, ${input.salt}, ${input.role}, 'active', ${input.createdAt}, ${input.createdAt})
+      `;
+      return;
+    } catch (err: any) {
+      console.warn('[AI Studio] Remote auth write fallback:', err?.message || err);
+      sql = null;
+      localDb = db;
+    }
+  }
   if (localDb) {
     localDb.prepare(`
       INSERT INTO auth_users (id, name, email, password_hash, salt, role, status, created_at, last_login_at)
@@ -136,10 +167,6 @@ export async function createAuthUser(input: {
     `).run(input.id, input.name, input.email, input.role, input.createdAt, input.createdAt);
     return;
   }
-  await requireDatabase()`
-    INSERT INTO auth_users (id, name, email, password_hash, salt, role, status, created_at, last_login_at)
-    VALUES (${input.id}, ${input.name}, ${input.email}, ${input.passwordHash}, ${input.salt}, ${input.role}, 'active', ${input.createdAt}, ${input.createdAt})
-  `;
 }
 
 export async function updateLastLogin(id: string, timestamp: string): Promise<void> {
@@ -219,7 +246,11 @@ export async function provisionConfiguredAdmin(): Promise<void> {
 }
 
 export function ensureAuthDatabase(): Promise<void> {
-  schemaPromise ??= initAuthDatabase().then(provisionConfiguredAdmin);
+  schemaPromise ??= initAuthDatabase()
+    .then(provisionConfiguredAdmin)
+    .catch((err) => {
+      console.warn('[AI Studio] Auth database init non-fatal notice:', err?.message || err);
+    });
   return schemaPromise;
 }
 

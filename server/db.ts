@@ -4,10 +4,9 @@ import fs from 'fs';
 import os from 'os';
 import crypto from 'node:crypto';
 
-const req = createRequire(import.meta.url || process.cwd() + '/package.json');
-
 let DatabaseSyncClass: any = null;
 try {
+  const req = typeof require !== 'undefined' ? require : createRequire(process.cwd() + '/package.json');
   DatabaseSyncClass = req('node:sqlite')?.DatabaseSync || null;
 } catch {
   DatabaseSyncClass = null;
@@ -244,9 +243,10 @@ export function verifyPassword(password: string, hash: string, salt: string): bo
 }
 
 export function initDatabase() {
-  // 1. Users table
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS users (
+  try {
+    // 1. Users table
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS users (
       id TEXT PRIMARY KEY,
       name TEXT NOT NULL,
       email TEXT UNIQUE NOT NULL,
@@ -429,6 +429,9 @@ export function initDatabase() {
     for (const log of initialLogs) {
       insertLog.run(log.id, log.timestamp, log.event, log.user_email, log.level, log.details);
     }
+  }
+  } catch (err) {
+    console.warn('[Database] initDatabase non-fatal notice (using resilient adapter):', err);
   }
 }
 
