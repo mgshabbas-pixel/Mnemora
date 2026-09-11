@@ -230,7 +230,7 @@ app.post('/api/auth/change-password', requireAuth, async (req: AuthenticatedRequ
 });
 
 // Reset password by email (public reset)
-app.post('/api/auth/reset-password', async (req, res) => {
+app.post(['/api/auth/reset-password', '/api/auth/reset'], async (req, res) => {
   try {
     await authDatabaseReady;
     const { email, newPassword } = req.body;
